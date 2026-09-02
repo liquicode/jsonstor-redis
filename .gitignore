@@ -1,0 +1,21 @@
+~*
+*~
+
+*.log
+*.out
+*.pid
+
+bower_components
+node_modules
+npm-debug.log
+package-lock.json
+.node_history
+
+.c9
+# .vscode
+.idea
+.DS_STORE
+.netbeans
+nbproject
+
+.~lock.*

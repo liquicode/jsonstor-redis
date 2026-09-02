@@ -1,0 +1,48 @@
+{
+	"name": "@liquicode/jsonstor-redis",
+	"version": "0.1.0",
+	"description": "A jsonstor adapter which stores documents on a Redis or Valkey server.",
+	"license": "MIT",
+	"homepage": "http://jsonstor.liquicode.com",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/liquicode/jsonstor-redis"
+	},
+	"authors": [
+		{
+			"name": "Andre' G. Bowlin",
+			"email": "agbowlin@gmail.com",
+			"homepage": "http://liquicode.com"
+		}
+	],
+	"type": "commonjs",
+	"main": "src/jsonstor-redis.js",
+	"types": "./types/jsonstor-redis.d.ts",
+	"exports": {
+		".": {
+			"types": "./types/jsonstor-redis.d.ts",
+			"import": "./src/jsonstor-redis.mjs",
+			"require": "./src/jsonstor-redis.js",
+			"default": "./src/jsonstor-redis.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"scripts": {
+		"publish version": "npx @liquicode/devops --tasks .\\build\\devops.tasks.js publish_version",
+		"start new version": "npx @liquicode/devops --tasks .\\build\\devops.tasks.js start_new_version"
+	},
+	"keywords": [
+		"jsonstor",
+		"redis",
+		"valkey",
+		"mongo query"
+	],
+	"devDependencies": {
+		"@liquicode/devops": "^0.1.0"
+	},
+	"dependencies": {
+		"@liquicode/jsongin": "^0.1.0",
+		"@liquicode/jsonstor": "^0.1.0",
+		"redis": "^6.2.1"
+	}
+}
