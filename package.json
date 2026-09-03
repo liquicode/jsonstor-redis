@@ -3,6 +3,9 @@
 	"version": "0.1.0",
 	"description": "A jsonstor adapter which stores documents on a Redis or Valkey server.",
 	"license": "MIT",
+	"engines": {
+		"node": ">=20.0.0"
+	},
 	"homepage": "http://jsonstor.liquicode.com",
 	"repository": {
 		"type": "git",
