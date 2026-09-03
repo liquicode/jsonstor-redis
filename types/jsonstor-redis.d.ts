@@ -23,6 +23,10 @@ declare module '@liquicode/jsonstor-redis'
 		UserName?: string;
 		/** That user's password. Empty means none. Defaults to `''`. */
 		Password?: string;
+		/** Encrypt the connection with TLS. Off by default so that a local server connects; a hosted Redis or Valkey requires it on. Defaults to `false`. */
+		Encrypt?: boolean;
+		/** Accept a certificate the machine does not trust, which is what a local server presents. Turn this off wherever `Encrypt` is on and the certificate is a real one. Defaults to `true`. */
+		TrustServerCertificate?: boolean;
 		/** The collection this storage reads and writes. It is the name of the single hash which holds the collection's documents. */
 		CollectionName: string;
 	}

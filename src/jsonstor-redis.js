@@ -100,6 +100,14 @@ module.exports = {
 		if ( jsongin.ShortType( Storage.Settings.Database ) !== 'n' ) { Storage.Settings.Database = 0; }
 		if ( jsongin.ShortType( Storage.Settings.UserName ) !== 's' ) { Storage.Settings.UserName = ''; }
 		if ( jsongin.ShortType( Storage.Settings.Password ) !== 's' ) { Storage.Settings.Password = ''; }
+		// ***The two names are the family's, not this driver's.*** `jsonstor-mssql` named these
+		// first and the same pair is spelled the same way wherever a driver can carry it. node-redis
+		// takes them as socket options, which is where they are mapped.
+		//
+		// ***Both defaults suit a local server and neither suits a hosted one.*** All five servers
+		// in the fleet are plaintext; a hosted Redis or Valkey wants the opposite pair.
+		if ( jsongin.ShortType( Storage.Settings.Encrypt ) !== 'b' ) { Storage.Settings.Encrypt = false; }
+		if ( jsongin.ShortType( Storage.Settings.TrustServerCertificate ) !== 'b' ) { Storage.Settings.TrustServerCertificate = true; }
 
 
 		//=====================================================================
@@ -173,6 +181,14 @@ module.exports = {
 					},
 					database: Storage.Settings.Database,
 				};
+				// ***Added rather than set false, the way mysql2 wants it.*** node-redis reads
+				// `socket.tls` as the request for TLS, and `rejectUnauthorized` is the inverse of
+				// trusting the certificate.
+				if ( Storage.Settings.Encrypt )
+				{
+					options.socket.tls = true;
+					options.socket.rejectUnauthorized = !Storage.Settings.TrustServerCertificate;
+				}
 				// ***Empty means absent rather than blank.*** A server with no ACL refuses a
 				// connection which offers an empty user, so the settings are omitted entirely
 				// rather than sent as empty strings.

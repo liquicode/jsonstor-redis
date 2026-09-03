@@ -41,6 +41,8 @@ let storage = jsonstor.GetStorage( 'jsonstor-redis', {
 	Database: 0,
 	UserName: '',
 	Password: '',
+	Encrypt: false,
+	TrustServerCertificate: true,
 	CollectionName: '...',
 } );
 ```
@@ -83,6 +85,8 @@ Settings
 | `Database` | No | `0` | Which of the server's numbered databases to use. A server offers sixteen by default and `0` is the one a client gets without asking. |
 | `UserName` | No | `''` | The user to connect as. Empty means none, and is what a server with no ACL expects. |
 | `Password` | No | `''` | That user's password. Empty means none. |
+| `Encrypt` | No | `false` | Encrypt the connection with TLS. Off by default so that a local server connects; a hosted Redis or Valkey requires it on. |
+| `TrustServerCertificate` | No | `true` | Accept a certificate the machine does not trust, which is what a local server presents. Turn this off wherever `Encrypt` is on and the certificate is a real one. |
 | `CollectionName` | ***Yes*** | - | The collection this storage reads and writes. It is the name of the single hash which holds the collection's documents. |
 
 Peculiarities
