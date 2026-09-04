@@ -29,6 +29,10 @@ declare module '@liquicode/jsonstor-redis'
 		TrustServerCertificate?: boolean;
 		/** The collection this storage reads and writes. It is the name of the single hash which holds the collection's documents. */
 		CollectionName: string;
+		/** The document field which is the identifier. Name the field an existing store is already keyed on to read one. Defaults to `"_id"`. */
+		PrimaryKey?: string;
+		/** Allow an update or a replacement to change the identifier. Off by default, so an operation which would move it is refused by name rather than silently discarded. Defaults to `false`. */
+		PrimaryKeyMutable?: boolean;
 	}
 
 

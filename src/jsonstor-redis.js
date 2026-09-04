@@ -67,6 +67,31 @@ const HELD_CLIENTS = {};
 let key_sequence = 0;
 
 
+//---------------------------------------------------------------------
+// ***The index is a hash beside the documents, not fields inside them.***
+//
+// A field in the document hash would be counted by `HLEN` and walked by `HSCAN`, so the O(1)
+// count would start lying and every scan would have to filter the index back out. A second key
+// costs one `DEL` at drop time and keeps both of those exactly as they were.
+//
+// ***This is why the clock field survives.*** Keying documents by the identifier instead would
+// have bought uniqueness and spent the natural order, which is the trade jsonstor-leveldb
+// records at the same place - and the two halves of this wave have to agree about what a
+// collection's natural order is.
+const INDEX_SEPARATOR = String.fromCharCode( 1 );
+const INDEX_SUFFIX = INDEX_SEPARATOR + 'jsonstor_index';
+
+// ***The one field which records that a lookup can no longer be trusted.***
+//
+// jsongin matches `{ _id: 'x' }` against a document whose identifier is `[ 'x' ]`, by the array
+// element rule every operator obeys - so an index filed under the array cannot answer that
+// criteria, and neither can a hit on the scalar, because it would answer with one of the two
+// documents and report success. A collection holding one is scanned instead.
+//
+// An encoded identifier always carries its short type and a colon, so nothing else lands here.
+const COMPLEX_KEY_FIELD = '';
+
+
 module.exports = {
 
 	AdapterName: 'jsonstor-redis',
@@ -91,11 +116,44 @@ module.exports = {
 		if ( jsongin.ShortType( Settings.Server ) !== 's' ) { throw new Error( `This adapter requires a Settings.Server string parameter.` ); }
 		if ( jsongin.ShortType( Settings.CollectionName ) !== 's' ) { throw new Error( `This adapter requires a Settings.CollectionName string parameter.` ); }
 		if ( !Settings.CollectionName.length ) { throw new Error( `Settings.CollectionName cannot be empty.` ); }
+		// ***The index hash is the collection's name with a suffix***, so a collection name
+		// carrying the separator could name another collection's index. Checked rather than
+		// assumed, which is what jsonstor-leveldb does with the two bytes bounding its ranges.
+		if ( Settings.CollectionName.includes( INDEX_SEPARATOR ) )
+		{
+			throw new Error( `Settings.CollectionName cannot contain character 1.` );
+		}
 
 
 		//=====================================================================
 		let Storage = jsonstor.StorageInterface();
 		Storage.Settings = jsongin.Clone( Settings );
+
+		//=====================================================================
+		// The key, resolved.
+		let key_declaration = jsonstor.PrimaryKey.Resolve( Storage.Settings );
+		if ( key_declaration.Fields.length > 1 )
+		{
+			// ***Declared, not built.*** One index field holds one encoded value, so an adapter
+			// which cannot honor a composite key refuses it by name.
+			throw new Error( `This adapter does not support a composite PrimaryKey: [${key_declaration.Fields.join( ', ' )}].` );
+		}
+		if ( key_declaration.Fields.length === 0 ) { key_declaration.Fields = [ jsonstor.PrimaryKey.DEFAULT_FIELD ]; }
+
+		Storage.PrimaryKeyInfo = {
+			Fields: key_declaration.Fields,
+			// The hash field is the clock, not the identifier, so there is no key column whose
+			// type would need declaring. The index carries the encoded value and the document
+			// carries the true one.
+			Types: [],
+			Mutable: key_declaration.Mutable,
+			Generated: true,
+			// ***jsonstor holds this index, even though it lives on the server.*** Redis has no
+			// secondary index of its own; every field here is written by this adapter, which is
+			// what makes RefreshIndex real work rather than a no-op.
+			IndexHostedBy: 'jsonstor',
+		};
+
 		if ( jsongin.ShortType( Storage.Settings.Port ) !== 'n' ) { Storage.Settings.Port = 6379; }
 		if ( jsongin.ShortType( Storage.Settings.Database ) !== 'n' ) { Storage.Settings.Database = 0; }
 		if ( jsongin.ShortType( Storage.Settings.UserName ) !== 's' ) { Storage.Settings.UserName = ''; }
@@ -262,6 +320,160 @@ module.exports = {
 		function hash_key()
 		{
 			return Storage.Settings.CollectionName;
+		}
+
+
+		//---------------------------------------------------------------------
+		// The hash holding this storage's index.
+		function index_hash_key()
+		{
+			return Storage.Settings.CollectionName + INDEX_SUFFIX;
+		}
+
+
+		//---------------------------------------------------------------------
+		// The encoded identifier a document carries, or null when it carries none.
+		function document_key_of( Document )
+		{
+			return jsonstor.PrimaryKey.DocumentKey( Document, Storage.PrimaryKeyInfo.Fields );
+		}
+
+
+		//---------------------------------------------------------------------
+		// Mints an identifier for a document which arrived without one.
+		function apply_new_key( Document )
+		{
+			let field = Storage.PrimaryKeyInfo.Fields[ 0 ];
+			let value = jsongin.GetValue( Document, field );
+			if ( typeof value !== 'undefined' ) { return; }
+			jsongin.SetValue( Document, field, jsonstor.NewUniqueID() );
+			return;
+		}
+
+
+		//---------------------------------------------------------------------
+		// The HSET arguments which file a document in the index, appended to Command.
+		function append_index_writes( Command, Document, DocumentKey )
+		{
+			let value = jsonstor.PrimaryKey.DocumentValue( Document, Storage.PrimaryKeyInfo.Fields );
+			if ( value === null ) { return false; }
+			Command.push( jsonstor.PrimaryKey.EncodeValue( value ), DocumentKey );
+			if ( !jsonstor.PrimaryKey.IsScalar( value ) ) { Command.push( COMPLEX_KEY_FIELD, '1' ); }
+			return true;
+		}
+
+
+		//---------------------------------------------------------------------
+		// Writes index entries, if there are any to write.
+		async function write_index( Pairs )
+		{
+			if ( !Pairs.length ) { return; }
+			let command = [ 'HSET', index_hash_key() ].concat( Pairs );
+			await WithClient(
+				async function ( Client )
+				{
+					return await Client.sendCommand( command );
+				} );
+			return;
+		}
+
+
+		//---------------------------------------------------------------------
+		// Removes index entries, if there are any to remove.
+		async function delete_index( Fields )
+		{
+			if ( !Fields.length ) { return; }
+			let command = [ 'HDEL', index_hash_key() ].concat( Fields );
+			await WithClient(
+				async function ( Client )
+				{
+					return await Client.sendCommand( command );
+				} );
+			return;
+		}
+
+
+		//---------------------------------------------------------------------
+		// Refuses an identifier which is already in the collection.
+		//
+		// ***One HGET rather than a scan***, which is the whole reason the index is here.
+		async function require_unique( EncodedKey, ExceptDocumentKey )
+		{
+			if ( EncodedKey === null ) { return; }
+			let found = await WithClient(
+				async function ( Client )
+				{
+					return await Client.sendCommand( [ 'HGET', index_hash_key(), EncodedKey ] );
+				} );
+			if ( found === null ) { return; }
+			if ( String( found ) === ExceptDocumentKey ) { return; }
+			throw new Error( `A document with this primary key already exists: ${ EncodedKey }.` );
+		}
+
+
+		//---------------------------------------------------------------------
+		// Refuses an update or a replace which moved the identifier. See
+		// jsonx/.plans/primary-keys-and-indexes.md - refusing is the only one of the three
+		// measured behaviors which cannot mislead a caller.
+		function check_key_move( Before, After )
+		{
+			if ( Storage.PrimaryKeyInfo.Mutable ) { return; }
+			if ( Before === After ) { return; }
+			throw new Error( `The primary key [${Storage.PrimaryKeyInfo.Fields[ 0 ]}] is not mutable, and this operation would change it from [${Before}] to [${After}].` );
+		}
+
+
+		//---------------------------------------------------------------------
+		// ***The document a by-key criteria asks for, or null to ask the scan.***
+		//
+		// Two round trips and no scan: the index answers the document's field, and HGET answers
+		// the document. The sentinel is read with the entry rather than after a miss, because a
+		// hit is just as wrong as a miss once the collection holds a non-scalar identifier -
+		// answering with the hit alone loses a row and reports success.
+		async function find_by_index( Criteria )
+		{
+			let encoded = jsonstor.PrimaryKey.CriteriaKey( Criteria, Storage.PrimaryKeyInfo.Fields );
+			if ( encoded === null ) { return null; }
+			let reply = await WithClient(
+				async function ( Client )
+				{
+					return await Client.sendCommand( [ 'HMGET', index_hash_key(), COMPLEX_KEY_FIELD, encoded ] );
+				} );
+			if ( reply[ 0 ] !== null ) { return null; }
+			if ( reply[ 1 ] === null ) { return { Entries: [] }; }
+			let document_key = String( reply[ 1 ] );
+			let value = await WithClient(
+				async function ( Client )
+				{
+					return await Client.sendCommand( [ 'HGET', hash_key(), document_key ] );
+				} );
+			if ( value === null )
+			{
+				// ***An index entry with no document behind it.*** Nothing this adapter writes
+				// can produce one, so it means the hash was written by something else. Falling
+				// through to the scan is the answer which cannot lose a row.
+				return null;
+			}
+			return { Entries: [ { Key: document_key, Document: JSON.parse( value ) } ] };
+		}
+
+
+		//---------------------------------------------------------------------
+		// What the index did.
+		//
+		// ***An index is a pushdown for an adapter with no query language to push down to***, so
+		// it reports in the same pair of numbers a WHERE clause does. PushdownRows is one or zero
+		// rather than the size of the collection, and that difference is the whole assertion.
+		function report_lookup( Options, Criteria, Scanned, Matched )
+		{
+			jsonstor.ReportStatistics( Options, {
+				Translator: '',
+				Pushdown: Criteria,
+				PushdownRows: Scanned,
+				Residual: {},
+				ResidualRows: Matched,
+			} );
+			return;
 		}
 
 
@@ -506,9 +718,55 @@ module.exports = {
 			await WithClient(
 				async function ( Client )
 				{
-					return await Client.sendCommand( [ 'DEL', hash_key() ] );
+					// ***Both keys, so the index goes with the documents.*** Dropping only the
+					// document hash would leave an index describing a collection which is no
+					// longer there, and the next insert would be refused as a duplicate of a
+					// document nobody can read.
+					return await Client.sendCommand( [ 'DEL', hash_key(), index_hash_key() ] );
 				} );
 			return true;
+		};
+
+
+		//=====================================================================
+		// RefreshIndex
+		//=====================================================================
+
+
+		// ***Rebuilds the index from a full scan, and answers how many entries it filed.***
+		//
+		// This hash is this adapter's own, so nothing else writes it and the index cannot drift
+		// on its own. It is real work rather than a no-op because the index is jsonstor's rather
+		// than the server's - Redis has no secondary index to maintain on our behalf - and
+		// because a collection written by an older version of this adapter has documents and no
+		// index at all. Calling it once brings such a collection up to date.
+		Storage.RefreshIndex = async function ( Options )
+		{
+			await ensure_floor_checked();
+			await WithClient(
+				async function ( Client )
+				{
+					return await Client.sendCommand( [ 'DEL', index_hash_key() ] );
+				} );
+			let entries = await read_documents();
+			let pairs = [];
+			let filed = 0;
+			let seen = {};
+			for ( let index = 0; index < entries.length; index++ )
+			{
+				let value = jsonstor.PrimaryKey.DocumentValue( entries[ index ].Document, Storage.PrimaryKeyInfo.Fields );
+				if ( value === null ) { continue; }
+				let encoded = jsonstor.PrimaryKey.EncodeValue( value );
+				// ***A rebuild reports what it found rather than refusing it.*** A collection may
+				// already hold a duplicate, and throwing here would leave the storage unusable
+				// with no way to look at what is wrong with it.
+				if ( seen[ encoded ] ) { continue; }
+				seen[ encoded ] = true;
+				append_index_writes( pairs, entries[ index ].Document, entries[ index ].Key );
+				filed++;
+			}
+			await write_index( pairs );
+			return filed;
 		};
 
 
@@ -547,13 +805,15 @@ module.exports = {
 				return counted;
 			}
 
-			let entries = await read_documents();
+			let looked_up = await find_by_index( Criteria );
+			let entries = looked_up ? looked_up.Entries : await read_documents();
 			let matched = 0;
 			for ( let index = 0; index < entries.length; index++ )
 			{
 				if ( jsongin.Query( entries[ index ].Document, Criteria ) ) { matched++; }
 			}
-			report_scan( Options, Criteria, entries.length, matched );
+			if ( looked_up ) { report_lookup( Options, Criteria, entries.length, matched ); }
+			else { report_scan( Options, Criteria, entries.length, matched ); }
 			return matched;
 		};
 
@@ -569,12 +829,17 @@ module.exports = {
 			if ( jsongin.ShortType( Document ) !== 'o' ) { throw new Error( `Document must be an object.` ); }
 			await ensure_floor_checked();
 			let document = jsongin.Clone( Document );
-			if ( typeof document._id === 'undefined' ) { document._id = jsonstor.NewUniqueID(); }
+			apply_new_key( document );
+			await require_unique( document_key_of( document ), null );
+			let document_key = new_document_key();
 			await WithClient(
 				async function ( Client )
 				{
-					return await Client.sendCommand( [ 'HSET', hash_key(), new_document_key(), JSON.stringify( document ) ] );
+					return await Client.sendCommand( [ 'HSET', hash_key(), document_key, JSON.stringify( document ) ] );
 				} );
+			let pairs = [];
+			append_index_writes( pairs, document, document_key );
+			await write_index( pairs );
 			if ( Options.ReturnDocuments ) { return document; }
 			return 1;
 		};
@@ -591,12 +856,19 @@ module.exports = {
 			if ( jsongin.ShortType( Documents ) !== 'a' ) { throw new Error( `Documents must be an array of objects.` ); }
 			await ensure_floor_checked();
 			let command = [ 'HSET', hash_key() ];
+			let index_pairs = [];
 			let inserted = [];
 			for ( let index = 0; index < Documents.length; index++ )
 			{
 				let document = jsongin.Clone( Documents[ index ] );
-				if ( typeof document._id === 'undefined' ) { document._id = jsonstor.NewUniqueID(); }
-				command.push( new_document_key(), JSON.stringify( document ) );
+				apply_new_key( document );
+				// ***A duplicate stops the insert where it stands.*** The HSET is not yet sent,
+				// so nothing before it is written either - which is a stronger promise than the
+				// scanning adapters can make and comes free from batching.
+				await require_unique( document_key_of( document ), null );
+				let document_key = new_document_key();
+				command.push( document_key, JSON.stringify( document ) );
+				append_index_writes( index_pairs, document, document_key );
 				inserted.push( document );
 			}
 			// ***One HSET carrying every pair, rather than one round trip per document.***
@@ -609,6 +881,7 @@ module.exports = {
 					{
 						return await Client.sendCommand( command );
 					} );
+				await write_index( index_pairs );
 			}
 			if ( Options.ReturnDocuments ) { return inserted; }
 			return inserted.length;
@@ -625,6 +898,19 @@ module.exports = {
 			if ( jsongin.ShortType( Options ) !== 'o' ) { Options = {}; }
 			check_criteria( Criteria );
 			await ensure_floor_checked();
+			let looked_up = await find_by_index( Criteria );
+			if ( looked_up )
+			{
+				let matched = null;
+				for ( let index = 0; index < looked_up.Entries.length; index++ )
+				{
+					if ( !jsongin.Query( looked_up.Entries[ index ].Document, Criteria ) ) { continue; }
+					matched = jsongin.Project( looked_up.Entries[ index ].Document, Projection );
+					break;
+				}
+				report_lookup( Options, Criteria, looked_up.Entries.length, matched ? 1 : 0 );
+				return matched;
+			}
 			let search = await find_first( Criteria );
 			let document = null;
 			if ( search.Found ) { document = jsongin.Project( search.Found.Document, Projection ); }
@@ -643,7 +929,8 @@ module.exports = {
 			if ( jsongin.ShortType( Options ) !== 'o' ) { Options = {}; }
 			check_criteria( Criteria );
 			await ensure_floor_checked();
-			let entries = await read_documents();
+			let looked_up = await find_by_index( Criteria );
+			let entries = looked_up ? looked_up.Entries : await read_documents();
 			let matches_everything = criteria_matches_everything( Criteria );
 			let documents = [];
 			for ( let index = 0; index < entries.length; index++ )
@@ -654,7 +941,8 @@ module.exports = {
 					documents.push( jsongin.Project( document, Projection ) );
 				}
 			}
-			report_scan( Options, Criteria, entries.length, documents.length );
+			if ( looked_up ) { report_lookup( Options, Criteria, entries.length, documents.length ); }
+			else { report_scan( Options, Criteria, entries.length, documents.length ); }
 			return documents;
 		};
 
@@ -669,7 +957,8 @@ module.exports = {
 			if ( jsongin.ShortType( Options ) !== 'o' ) { Options = {}; }
 			check_criteria( Criteria );
 			await ensure_floor_checked();
-			let entries = await read_documents();
+			let looked_up = await find_by_index( Criteria );
+			let entries = looked_up ? looked_up.Entries : await read_documents();
 			let matches_everything = criteria_matches_everything( Criteria );
 			let documents = [];
 			for ( let index = 0; index < entries.length; index++ )
@@ -682,7 +971,8 @@ module.exports = {
 			}
 			if ( Sort ) { documents = jsongin.Sort( documents, Sort ); }
 			if ( MaxCount && ( MaxCount > 0 ) && ( documents.length >= MaxCount ) ) { documents = documents.splice( 0, MaxCount ); }
-			report_scan( Options, Criteria, entries.length, documents.length );
+			if ( looked_up ) { report_lookup( Options, Criteria, entries.length, documents.length ); }
+			else { report_scan( Options, Criteria, entries.length, documents.length ); }
 			return documents;
 		};
 
@@ -707,11 +997,22 @@ module.exports = {
 				// fresh field would send it to the end of the collection, which no other
 				// adapter does and no caller asked for.
 				modified = jsongin.Update( search.Found.Document, Updates );
+				let before = document_key_of( search.Found.Document );
+				let after = document_key_of( modified );
+				check_key_move( before, after );
+				if ( before !== after ) { await require_unique( after, search.Found.Key ); }
 				await WithClient(
 					async function ( Client )
 					{
 						return await Client.sendCommand( [ 'HSET', hash_key(), search.Found.Key, JSON.stringify( modified ) ] );
 					} );
+				if ( before !== after )
+				{
+					if ( before !== null ) { await delete_index( [ before ] ); }
+					let pairs = [];
+					append_index_writes( pairs, modified, search.Found.Key );
+					await write_index( pairs );
+				}
 				modified_count++;
 			}
 			if ( Options.ReturnDocuments ) { return modified; }
@@ -732,12 +1033,23 @@ module.exports = {
 			let entries = await read_documents();
 			let matches_everything = criteria_matches_everything( Criteria );
 			let command = [ 'HSET', hash_key() ];
+			let index_pairs = [];
+			let index_removals = [];
 			let modified = [];
 			for ( let index = 0; index < entries.length; index++ )
 			{
 				let entry = entries[ index ];
 				if ( !matches_everything && !jsongin.Query( entry.Document, Criteria ) ) { continue; }
 				let document = jsongin.Update( entry.Document, Updates );
+				let before = document_key_of( entry.Document );
+				let after = document_key_of( document );
+				check_key_move( before, after );
+				if ( before !== after )
+				{
+					await require_unique( after, entry.Key );
+					if ( before !== null ) { index_removals.push( before ); }
+					append_index_writes( index_pairs, document, entry.Key );
+				}
 				command.push( entry.Key, JSON.stringify( document ) );
 				modified.push( document );
 			}
@@ -748,6 +1060,8 @@ module.exports = {
 					{
 						return await Client.sendCommand( command );
 					} );
+				await delete_index( index_removals );
+				await write_index( index_pairs );
 			}
 			if ( Options.ReturnDocuments ) { return modified; }
 			return modified.length;
@@ -763,7 +1077,6 @@ module.exports = {
 		{
 			if ( jsongin.ShortType( Options ) !== 'o' ) { Options = {}; }
 			if ( jsongin.ShortType( Document ) !== 'o' ) { throw new Error( `Document must be an object.` ); }
-			if ( jsongin.ShortType( Document._id ) === 'u' ) { throw new Error( `Document must contain an _id field.` ); }
 			await ensure_floor_checked();
 			let search = await find_first( Criteria );
 			let modified = null;
@@ -771,11 +1084,32 @@ module.exports = {
 			if ( search.Found )
 			{
 				modified = jsongin.Clone( Document );
+				// ***A replacement with no primary key carries the matched document's key
+				// over.*** This adapter used to throw here, which was one of three behaviors
+				// across the family - four adapters threw, three changed the key, six kept it -
+				// and the guide's own documented example is the shape which threw.
+				let key_field = Storage.PrimaryKeyInfo.Fields[ 0 ];
+				if ( typeof jsongin.GetValue( modified, key_field ) === 'undefined' )
+				{
+					let carried = jsongin.GetValue( search.Found.Document, key_field );
+					if ( typeof carried !== 'undefined' ) { jsongin.SetValue( modified, key_field, carried ); }
+				}
+				let before = document_key_of( search.Found.Document );
+				let after = document_key_of( modified );
+				check_key_move( before, after );
+				if ( before !== after ) { await require_unique( after, search.Found.Key ); }
 				await WithClient(
 					async function ( Client )
 					{
 						return await Client.sendCommand( [ 'HSET', hash_key(), search.Found.Key, JSON.stringify( modified ) ] );
 					} );
+				if ( before !== after )
+				{
+					if ( before !== null ) { await delete_index( [ before ] ); }
+					let pairs = [];
+					append_index_writes( pairs, modified, search.Found.Key );
+					await write_index( pairs );
+				}
 				modified_count++;
 			}
 			if ( Options.ReturnDocuments ) { return modified; }
@@ -804,6 +1138,8 @@ module.exports = {
 					{
 						return await Client.sendCommand( [ 'HDEL', hash_key(), search.Found.Key ] );
 					} );
+				let encoded = document_key_of( search.Found.Document );
+				if ( encoded !== null ) { await delete_index( [ encoded ] ); }
 				deleted_count++;
 			}
 			if ( Options.ReturnDocuments ) { return deleted; }
@@ -824,12 +1160,15 @@ module.exports = {
 			let entries = await read_documents();
 			let matches_everything = criteria_matches_everything( Criteria );
 			let command = [ 'HDEL', hash_key() ];
+			let index_removals = [];
 			let deleted = [];
 			for ( let index = 0; index < entries.length; index++ )
 			{
 				let entry = entries[ index ];
 				if ( !matches_everything && !jsongin.Query( entry.Document, Criteria ) ) { continue; }
 				command.push( entry.Key );
+				let encoded = document_key_of( entry.Document );
+				if ( encoded !== null ) { index_removals.push( encoded ); }
 				deleted.push( entry.Document );
 			}
 			if ( deleted.length )
@@ -839,6 +1178,7 @@ module.exports = {
 					{
 						return await Client.sendCommand( command );
 					} );
+				await delete_index( index_removals );
 			}
 			if ( Options.ReturnDocuments ) { return deleted; }
 			return deleted.length;

@@ -44,6 +44,8 @@ let storage = jsonstor.GetStorage( 'jsonstor-redis', {
 	Encrypt: false,
 	TrustServerCertificate: true,
 	CollectionName: '...',
+	PrimaryKey: "_id",
+	PrimaryKeyMutable: false,
 } );
 ```
 
@@ -88,6 +90,8 @@ Settings
 | `Encrypt` | No | `false` | Encrypt the connection with TLS. Off by default so that a local server connects; a hosted Redis or Valkey requires it on. |
 | `TrustServerCertificate` | No | `true` | Accept a certificate the machine does not trust, which is what a local server presents. Turn this off wherever `Encrypt` is on and the certificate is a real one. |
 | `CollectionName` | ***Yes*** | - | The collection this storage reads and writes. It is the name of the single hash which holds the collection's documents. |
+| `PrimaryKey` | No | `"_id"` | The document field which is the identifier. Name the field an existing store is already keyed on to read one. |
+| `PrimaryKeyMutable` | No | `false` | Allow an update or a replacement to change the identifier. Off by default, so an operation which would move it is refused by name rather than silently discarded. |
 
 Peculiarities
 ---------------------------------------------------------------------
