@@ -30,6 +30,13 @@
 		},
 		"./package.json": "./package.json"
 	},
+	"files": [
+		"src",
+		"types",
+		"license.md",
+		"readme.md",
+		"history.md"
+	],
 	"scripts": {
 		"publish version": "npx @liquicode/devops --tasks .\\build\\devops.tasks.js publish_version",
 		"start new version": "npx @liquicode/devops --tasks .\\build\\devops.tasks.js start_new_version"
