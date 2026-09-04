@@ -19,9 +19,9 @@ declare module '@liquicode/jsonstor-redis'
 		Port?: number;
 		/** Which of the server's numbered databases to use. A server offers sixteen by default and `0` is the one a client gets without asking. Defaults to `0`. */
 		Database?: number;
-		/** The user to connect as. Empty means none, and is what a server with no ACL expects. Defaults to `''`. */
+		/** The user to connect as. Empty means none, and is what a server with no ACL expects. Defaults to `""`. */
 		UserName?: string;
-		/** That user's password. Empty means none. Defaults to `''`. */
+		/** That user's password. Empty means none. Defaults to `""`. */
 		Password?: string;
 		/** Encrypt the connection with TLS. Off by default so that a local server connects; a hosted Redis or Valkey requires it on. Defaults to `false`. */
 		Encrypt?: boolean;
