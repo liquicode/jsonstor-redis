@@ -952,7 +952,7 @@ module.exports = {
 		//=====================================================================
 
 
-		Storage.FindMany2 = async function ( Criteria, Projection, Sort, MaxCount, Options )
+		Storage.FindMany2 = async function ( Criteria, Projection, Sort, Paging, Options )
 		{
 			if ( jsongin.ShortType( Options ) !== 'o' ) { Options = {}; }
 			check_criteria( Criteria );
@@ -970,7 +970,7 @@ module.exports = {
 				}
 			}
 			if ( Sort ) { documents = jsongin.Sort( documents, Sort ); }
-			if ( MaxCount && ( MaxCount > 0 ) && ( documents.length >= MaxCount ) ) { documents = documents.splice( 0, MaxCount ); }
+			documents = jsonstor.Paging.Apply( documents, Paging );
 			if ( looked_up ) { report_lookup( Options, Criteria, entries.length, documents.length ); }
 			else { report_scan( Options, Criteria, entries.length, documents.length ); }
 			return documents;
