@@ -9,7 +9,7 @@
 	"homepage": "http://jsonstor.liquicode.com",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/liquicode/jsonstor-redis"
+		"url": "git+https://github.com/liquicode/jsonstor-redis.git"
 	},
 	"authors": [
 		{
