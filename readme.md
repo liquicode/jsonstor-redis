@@ -90,18 +90,16 @@ Settings
 | `Encrypt` | No | `false` | Encrypt the connection with TLS. Off by default so that a local server connects; a hosted Redis or Valkey requires it on. |
 | `TrustServerCertificate` | No | `true` | Accept a certificate the machine does not trust, which is what a local server presents. Turn this off wherever `Encrypt` is on and the certificate is a real one. |
 | `CollectionName` | ***Yes*** | - | The collection this storage reads and writes. It is the name of the single hash which holds the collection's documents. |
-| `PrimaryKey` | No | `"_id"` | The document field which is the identifier. Name the field an existing store is already keyed on to read one. |
-| `PrimaryKeyMutable` | No | `false` | Allow an update or a replacement to change the identifier. Off by default, so an operation which would move it is refused by name rather than silently discarded. |
+| `PrimaryKey` | No | `"_id"` | The field which holds the identifier. Set it to the key field of an existing store. |
+| `PrimaryKeyMutable` | No | `false` | Allow an update or replacement to change the identifier. When `false`, such an operation is refused. |
 
 Peculiarities
 ---------------------------------------------------------------------
 
-- ***This adapter reaches Redis and Valkey with one driver, and both are supported.*** `GetStorage( 'jsonstor-redis' )` and `GetStorage( 'jsonstor-valkey' )` both work, and so do the version names for either product. Valkey forked from Redis and still serves the same protocol, so the two are reached identically - over the commands this adapter uses they were measured to be the same server.
-- ***`StorageInfo()` tells you which product you actually reached.*** It reports `Product` as `Redis` or `Valkey` and `Version` as that server's own. ***This matters more than it sounds:*** a Valkey server introduces itself as Redis 7.2.4 no matter which Valkey version it is - 7.2 and 8.1 both say 7.2.4 - so the number you would read from a protocol dump is a compatibility claim rather than a version. The banner carries both.
-- ***Redis has no query language, so every criteria is decided by `jsongin`.*** There is no clause to build and nothing is pre-filtered: a read fetches the collection and each document is tested in this process. ***That is always the right answer and it costs the whole collection***, so a query here scales with how many documents the collection holds rather than with how many match.
-- ***A collection is one hash, and `CollectionName` names it.*** One server holds as many collections as you name, they do not see each other, and `DropStorage` deletes one collection rather than the database. Use `Database` to keep jsonstor's collections away from other traffic on the same server.
-- ***A collection reads back in the order it was written.*** Redis returns a hash in no order at all, so the adapter imposes one: insertion order is carried by the field each document is stored under, and an update leaves a document where it was. Use `FindMany2` with a `Sort` when you need a different order.
-- ***A document is stored as JSON text.*** The value which comes back is the characters which were stored, so a query comparing a whole object compares the document you wrote rather than a re-serialized form of it.
+- ***Redis and Valkey are both supported.*** Use `jsonstor-redis` or `jsonstor-valkey`, or a version name for either. `StorageInfo()` reports which product you reached, as `Product: 'Redis'` or `'Valkey'`, with that server's own version.
+- ***Redis has no query language.*** A criteria naming one identifier, such as `{ _id: 'a' }`, reads that document directly. Any other criteria reads the whole collection and `jsongin` checks each document.
+- ***A collection is one hash***, named by `CollectionName`. Collections on one server do not see each other, and `DropStorage` deletes only its own. Use `Database` to keep them apart from other data on the server.
+- A document is stored as JSON text.
 
 Storage Interface
 ---------------------------------------------------------------------
